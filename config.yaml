@@ -1,0 +1,87 @@
+# Create a config file that defines Transactions Per Second (TPS), 
+# specifying how many records to send every second over TCP (e.g., s1,100, s2,500)
+
+redis:
+  address: "localhost:6379"
+  password: ""
+  db: 0
+
+client:
+  # This sets the maximum number of TCP connections the client will establish with the server 
+  max_connections: 10
+  # This sets the maximum number of requests each connection will send to the server
+  max_requests: 100
+  # This defines the TPS (Transactions Per Second) for different seconds (s1, s2, etc.)
+  tps:
+    s1: 800
+    s2: 300
+    s3: 600
+    s4: 500
+    s5: 200
+    s6: 900
+    s7: 700
+    s8: 1000
+    s9: 400
+    s10: 100
+    s11: 800
+    s12: 300
+    s13: 600
+    s14: 500
+    s15: 200
+    s16: 900
+    s17: 700
+    s18: 1000
+    s19: 400
+    s20: 100
+    s21: 800
+    s22: 300
+    s23: 600
+    s24: 500
+    s25: 200
+    s26: 900
+    s27: 700
+    s28: 1000
+    s29: 400
+    s30: 100
+    s31: 800
+    s32: 300
+    s33: 600
+    s34: 500
+    s35: 200
+    s36: 900
+    s37: 700
+    s38: 1000
+    s39: 400
+    s40: 100
+    s41: 800
+    s42: 300
+    s43: 600
+    s44: 500
+    s45: 200
+    s46: 900
+    s47: 700
+    s48: 1000
+    s49: 400
+    s50: 100
+    s51: 800
+    s52: 300
+    s53: 600
+    s54: 500
+    s55: 200
+    s56: 900
+    s57: 700
+    s58: 1000
+    s59: 400
+    s60: 1000
+  address: 127.0.0.1
+  ports:
+    - 8000
+    - 8001
+    - 8002
+    - 8003
+    - 8004
+    - 8005
+    - 8006
+    - 8007
+    - 8008
+    - 8009
