@@ -29,7 +29,6 @@ type Client struct {
 	redisClient *redis.Client
 	connections []*net.TCPConn
 	workerPool  chan struct{}
-	rateLimiter *RateLimiter
 }
 
 /*
@@ -41,7 +40,6 @@ func NewClient(cfg config.ClientConfig, redisClient *redis.Client) *Client {
 		redisClient: redisClient,
 		connections: make([]*net.TCPConn, 0, cfg.MaxConnections),
 		workerPool:  make(chan struct{}, cfg.MaxConnections),
-		rateLimiter: NewRateLimiter(100), // Set to 100 requests per second             // Initialize the global cursor
 	}
 }
 
@@ -116,7 +114,7 @@ func (c *Client) Run() error {
 	for {
 		currentTime := time.Now()
 		if currentTime.Sub(lastFetchTime) >= time.Second { // Check if at least one second has passed
-			second := time.Now().Second()
+			second := currentTime.Second()
 			// Get the count of records to fetch based on TPS
 			tps, err := GetCurrentTPS(cfg.ClientConfig, second)
 			if err != nil {
@@ -152,19 +150,18 @@ func (c *Client) Run() error {
 				log.Printf("All records have been fetched from Redis.")
 				break
 			}
-
-			// Sleep until the next second to ensure we fetch records only once per second
-			time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
 		}
 	}
 
 	// Check if the record channel is empty
 	for {
 		if len(recordChan) == 0 {
-			time.Sleep(30 * time.Second)
+			time.Sleep(1 * time.Minute)
+			//Adding delay of 1 Minute to process response
 			if len(recordChan) == 0 {
 				break
 			}
+			continue
 		}
 		time.Sleep(5 * time.Second)
 	}
@@ -240,18 +237,25 @@ func (c *Client) worker(id int, recordChan chan string, stopChan chan struct{}) 
 	conn := c.connections[id]
 	defer conn.Close()
 
+	// Initialize a rate limiter for this worker
+	workerRateLimiter := NewRateLimiter(100) // Each worker can send 100 requests per second
 	scanner := bufio.NewScanner(conn)
+
+	requestsSent := 0         // Counter for requests sent
+	responsesReceived := 0    // Counter for responses received
+	recordChanClosed := false // Flag to track if recordChan is closed
 
 	for {
 		select {
 		case record, ok := <-recordChan:
 			if !ok {
-				log.Printf("Worker %d: Channel waiting, stopping.\n", id)
-				continue // Exit if the channel is closed
+				log.Printf("Worker %d: Record channel closed.\n", id)
+				recordChanClosed = true // Set the flag when the record channel is closed
+				continue                // Continue to check for responses
 			}
 
-			// Wait for a token to ensure rate limiting
-			c.rateLimiter.Wait() // Ensure only 100 requests per second
+			// Wait for a token to ensure rate limiting for this worker
+			workerRateLimiter.Wait() // Ensure only 100 requests per second for this worker
 
 			// Prepare request
 			req := Request{
@@ -273,45 +277,47 @@ func (c *Client) worker(id int, recordChan chan string, stopChan chan struct{}) 
 			}
 
 			log.Printf("Worker %d: Successfully sent request %s\n", id, req.Key)
+			requestsSent++ // Increment the requests sent counter
 
-			// Read response from server
-			if !scanner.Scan() {
-				log.Printf("Worker %d: Failed to read response: %v\n", id, scanner.Err())
-				return
-			}
+			// Check for responses immediately after sending the request
+			if scanner.Scan() {
+				rawResponse := scanner.Bytes() // Get the raw response
+				if len(rawResponse) == 0 {
+					log.Printf("Worker %d: Received empty response\n", id)
+					continue
+				}
 
-			rawResponse := scanner.Bytes() // Get the raw response
-			if len(rawResponse) == 0 {
-				log.Printf("Worker %d: Received empty response\n", id)
-				return
-			}
+				var resp Response
+				if err := json.Unmarshal(rawResponse, &resp); err != nil {
+					log.Printf("Worker %d: Failed to unmarshal response: %v\n", id, err)
+					return
+				}
 
-			//log.Printf("Worker %d: Raw response: %s\n", id, string(rawResponse)) // Log the raw response
+				// Verify the response matches the request
+				if resp.Key != req.Key {
+					log.Printf("Worker %d: Response key mismatch. Expected: %s, Got: %s\n", id, req.Key, resp.Key)
+					return
+				}
 
-			var resp Response
-			if err := json.Unmarshal(rawResponse, &resp); err != nil {
-				log.Printf("Worker %d: Failed to unmarshal response: %v\n", id, err)
-				return
-			}
+				// Update Redis with the response
+				updatedValue := fmt.Sprintf("%s:ID:%d", record, resp.ID)
+				err = c.redisClient.UpdateRecord(req.Key, updatedValue)
+				if err != nil {
+					log.Printf("Worker %d: Failed to update record %s with response: %v\n", id, req.Key, err)
+				} else {
+					log.Printf("Worker %d: Successfully updated %s with ID %d\n", id, req.Key, resp.ID)
+				}
 
-			// Verify the response matches the request
-			if resp.Key != req.Key {
-				log.Printf("Worker %d: Response key mismatch. Expected: %s, Got: %s\n", id, req.Key, resp.Key)
-				return
-			}
-
-			// Update Redis with the response
-			updatedValue := fmt.Sprintf("%s:ID:%d", record, resp.ID)
-			err = c.redisClient.UpdateRecord(req.Key, updatedValue)
-			if err != nil {
-				log.Printf("Worker %d: Failed to update record %s with response: %v\n", id, req.Key, err)
-			} else {
-				log.Printf("Worker %d: Successfully updated %s with ID %d\n", id, req.Key, resp.ID)
+				responsesReceived++ // Increment the responses received counter
 			}
 
 		case <-stopChan:
-			log.Printf("Worker %d stopping. Closing connection %s: stop signal received.", id, conn.RemoteAddr())
-			return // Exit when stop signal is received
+			log.Printf("Worker %d: Stop signal received.\n", id)
+			// If the stop channel is closed, check if we should exit
+			if recordChanClosed && responsesReceived == requestsSent {
+				log.Printf("Worker %d: All responses received and channels closed, exiting.\n", id)
+				return // Exit when all responses have been received and channels are closed
+			}
 		}
 	}
 }
